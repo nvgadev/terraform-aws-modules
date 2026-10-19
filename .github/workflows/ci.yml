@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  modules:
+    name: ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [vpc, eks, ecr, rds-postgres, iam-github-oidc]
+    defaults:
+      run:
+        working-directory: modules/${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+
+      - name: fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: init
+        run: terraform init -backend=false
+
+      - name: validate
+        run: terraform validate
+
+      - name: test (mock provider, no AWS calls)
+        run: terraform test
+
+      - name: validate example
+        working-directory: modules/${{ matrix.module }}/examples/basic
+        run: |
+          terraform init -backend=false
+          terraform validate
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.58.1
+
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          tflint --init --config="$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --config="$GITHUB_WORKSPACE/.tflint.hcl" --format=compact
+
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: modules
+          framework: terraform
+          quiet: true
+          compact: true
+
+  docs:
+    name: terraform-docs up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install terraform-docs
+        run: |
+          curl -sSLo td.tgz https://github.com/terraform-docs/terraform-docs/releases/download/v0.20.0/terraform-docs-v0.20.0-linux-amd64.tar.gz
+          tar -xzf td.tgz terraform-docs && sudo mv terraform-docs /usr/local/bin/ && rm td.tgz
+
+      - name: Regenerate and diff
+        run: |
+          for m in modules/*/; do terraform-docs -c .terraform-docs.yml "$m"; done
+          git diff --exit-code -- '*.md' || { echo "::error::READMEs are stale. Run: for m in modules/*/; do terraform-docs -c .terraform-docs.yml \$m; done"; exit 1; }
+
+  # Proves GitHub OIDC -> AWS works for this repo (read-only plan role, no keys).
+  aws-oidc:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: tf-modules-${{ github.run_id }}
+
+      - name: Who am I
+        run: aws sts get-caller-identity --query Arn --output text
