@@ -1,0 +1,22 @@
+# Terraform / OpenTofu working files
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+tfplan
+*.tfplan
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Reusable modules do not pin providers; callers own their lock files.
+.terraform.lock.hcl
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
